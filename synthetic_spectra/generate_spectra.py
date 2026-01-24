@@ -311,10 +311,8 @@ def generate_training_batch(
     
     print(f"\nGenerated {len(generated_spectra)} samples total")
     
-    # Save labels JSON
-    labels_path = output_dir / "labels.json"
-    generate_labels_json(generated_spectra, labels_path)
-    print(f"Labels saved to: {labels_path}")
+    # Individual JSON labels are saved per-sample by save_spectrum()
+    # No combined labels.json needed for efficient large-scale training
     
     return generated_spectra
 
