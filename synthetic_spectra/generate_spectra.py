@@ -332,8 +332,8 @@ def main():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="./data/synthetic",
-        help="Output directory (default: ./data/synthetic)"
+        default="O:/master_data_collection/isotopev2",
+        help="Output directory (default: O:/master_data_collection/isotopev2)"
     )
     
     parser.add_argument(

@@ -386,7 +386,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data", "-d",
         type=str,
-        default="data/synthetic",
+        default="O:/master_data_collection/isotopev2",
         help="Path to data directory"
     )
     parser.add_argument(

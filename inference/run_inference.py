@@ -30,7 +30,7 @@ def main():
     parser.add_argument(
         "--data", "-d",
         type=str,
-        default="data/synthetic",
+        default="O:/master_data_collection/isotopev2",
         help="Path to data directory with spectra"
     )
     parser.add_argument(

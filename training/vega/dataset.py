@@ -224,7 +224,9 @@ def create_data_loaders(
     train_split: float = 0.8,
     val_split: float = 0.1,
     test_split: float = 0.1,
-    num_workers: int = 0,
+    num_workers: int = 8,
+    prefetch_factor: int = 4,
+    persistent_workers: bool = True,
     isotope_index: Optional[IsotopeIndex] = None,
     max_activity_bq: float = 1000.0,
     seed: int = 42
@@ -238,7 +240,9 @@ def create_data_loaders(
         train_split: Fraction of data for training
         val_split: Fraction of data for validation
         test_split: Fraction of data for testing
-        num_workers: Number of data loading workers
+        num_workers: Number of data loading workers (parallel I/O)
+        prefetch_factor: Batches to prefetch per worker
+        persistent_workers: Keep workers alive between epochs
         isotope_index: Isotope name to index mapping
         max_activity_bq: Maximum activity for normalization
         seed: Random seed for reproducibility
@@ -285,14 +289,20 @@ def create_data_loaders(
         generator=generator
     )
     
-    # Create data loaders
+    # Create data loaders with parallel loading support
+    # For Windows, num_workers > 0 requires spawn method (handled by PyTorch)
+    use_workers = num_workers > 0
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=min(batch_size, train_size),
         shuffle=True,
         num_workers=num_workers,
         collate_fn=collate_fn,
-        pin_memory=True
+        pin_memory=True,
+        prefetch_factor=prefetch_factor if use_workers else None,
+        persistent_workers=persistent_workers and use_workers,
+        drop_last=True  # Drop incomplete batches for consistent training
     )
     
     val_loader = DataLoader(
@@ -301,7 +311,9 @@ def create_data_loaders(
         shuffle=False,
         num_workers=num_workers,
         collate_fn=collate_fn,
-        pin_memory=True
+        pin_memory=True,
+        prefetch_factor=prefetch_factor if use_workers else None,
+        persistent_workers=persistent_workers and use_workers
     ) if val_size > 0 else None
     
     test_loader = DataLoader(
@@ -310,8 +322,13 @@ def create_data_loaders(
         shuffle=False,
         num_workers=num_workers,
         collate_fn=collate_fn,
-        pin_memory=True
+        pin_memory=True,
+        prefetch_factor=prefetch_factor if use_workers else None,
+        persistent_workers=persistent_workers and use_workers
     ) if test_size > 0 else None
+    
+    if num_workers > 0:
+        print(f"DataLoader: {num_workers} workers, prefetch_factor={prefetch_factor}, persistent={persistent_workers}")
     
     return train_loader, val_loader, test_loader
 

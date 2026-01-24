@@ -22,6 +22,16 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+import numpy as np
+
+# Sklearn metrics for comprehensive evaluation
+from sklearn.metrics import (
+    roc_auc_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    hamming_loss
+)
 
 from .model import VegaModel, VegaConfig, VegaLoss
 from .dataset import create_data_loaders, SpectrumDataset
@@ -32,14 +42,14 @@ from .isotope_index import IsotopeIndex, get_default_isotope_index
 class TrainingConfig:
     """Configuration for training."""
     # Data
-    data_dir: str = "data/synthetic"
+    data_dir: str = "O:/master_data_collection/isotopev2"
     
     # Model save path
     model_dir: str = "models"
     model_name: str = "vega"
     
     # Training hyperparameters
-    batch_size: int = 32
+    batch_size: int = 64  # Increased from 32 for better GPU utilization
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     num_epochs: int = 100
@@ -61,8 +71,10 @@ class TrainingConfig:
     val_split: float = 0.1
     test_split: float = 0.1
     
-    # Workers
-    num_workers: int = 0  # Set to 0 for Windows compatibility
+    # Workers - parallel data loading for better GPU utilization
+    num_workers: int = 8  # Parallel data loading workers
+    prefetch_factor: int = 4  # Batches to prefetch per worker
+    persistent_workers: bool = True  # Keep workers alive between epochs
     
     # Reproducibility
     seed: int = 42
@@ -161,7 +173,20 @@ class VegaTrainer:
         reg_loss_sum = 0.0
         num_batches = 0
         
+        # Track accuracy during training
+        correct_isotopes = 0
+        total_isotopes = 0
+        
+        # Timing for profiling - track data loading vs GPU compute
+        data_time = 0.0
+        compute_time = 0.0
+        data_start = time.time()
+        
         for batch in train_loader:
+            # Data loading time (time spent waiting for next batch)
+            data_time += time.time() - data_start
+            compute_start = time.time()
+            
             # Move to device
             spectra = batch['spectrum'].to(self.device)
             presence = batch['presence_labels'].to(self.device)
@@ -173,9 +198,9 @@ class VegaTrainer:
             # Forward pass with optional mixed precision
             if self.scaler is not None:
                 with torch.amp.autocast('cuda'):
-                    pred_probs, pred_activities = self.model(spectra)
+                    pred_logits, pred_activities = self.model(spectra)
                     loss, loss_dict = self.loss_fn(
-                        pred_probs, pred_activities, presence, activities
+                        pred_logits, pred_activities, presence, activities
                     )
                 
                 # Backward pass with scaling
@@ -183,9 +208,9 @@ class VegaTrainer:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                pred_probs, pred_activities = self.model(spectra)
+                pred_logits, pred_activities = self.model(spectra)
                 loss, loss_dict = self.loss_fn(
-                    pred_probs, pred_activities, presence, activities
+                    pred_logits, pred_activities, presence, activities
                 )
                 
                 loss.backward()
@@ -195,16 +220,32 @@ class VegaTrainer:
             cls_loss_sum += loss_dict['classification']
             reg_loss_sum += loss_dict['regression']
             num_batches += 1
+            
+            # Calculate training accuracy (detach to avoid memory buildup)
+            with torch.no_grad():
+                pred_probs = torch.sigmoid(pred_logits)
+                pred_presence = (pred_probs >= 0.5).float()
+                correct_isotopes += (pred_presence == presence).sum().item()
+                total_isotopes += presence.numel()
+            
+            # Mark compute time and restart timing for data loading
+            compute_time += time.time() - compute_start
+            data_start = time.time()
+        
+        train_accuracy = correct_isotopes / total_isotopes if total_isotopes > 0 else 0.0
         
         return {
             'train_loss': total_loss / num_batches,
             'train_cls_loss': cls_loss_sum / num_batches,
-            'train_reg_loss': reg_loss_sum / num_batches
+            'train_reg_loss': reg_loss_sum / num_batches,
+            'train_accuracy': train_accuracy,
+            'data_time': data_time,
+            'compute_time': compute_time
         }
     
     @torch.no_grad()
     def validate(self, val_loader) -> Dict[str, float]:
-        """Validate the model."""
+        """Validate the model with comprehensive metrics."""
         if val_loader is None:
             return {}
         
@@ -214,9 +255,10 @@ class VegaTrainer:
         reg_loss_sum = 0.0
         num_batches = 0
         
-        # Metrics
-        correct_isotopes = 0
-        total_isotopes = 0
+        # Collect all predictions and labels for sklearn metrics
+        all_probs = []
+        all_preds = []
+        all_labels = []
         
         for batch in val_loader:
             spectra = batch['spectrum'].to(self.device)
@@ -233,20 +275,76 @@ class VegaTrainer:
             reg_loss_sum += loss_dict['regression']
             num_batches += 1
             
-            # Calculate accuracy (apply sigmoid to logits first)
+            # Collect predictions for metrics
             pred_probs = torch.sigmoid(pred_logits)
             pred_presence = (pred_probs >= 0.5).float()
-            correct_isotopes += (pred_presence == presence).sum().item()
-            total_isotopes += presence.numel()
+            
+            all_probs.append(pred_probs.cpu().numpy())
+            all_preds.append(pred_presence.cpu().numpy())
+            all_labels.append(presence.cpu().numpy())
         
-        accuracy = correct_isotopes / total_isotopes if total_isotopes > 0 else 0.0
+        # Concatenate all batches
+        all_probs = np.vstack(all_probs)
+        all_preds = np.vstack(all_preds)
+        all_labels = np.vstack(all_labels)
         
-        return {
+        # Basic accuracy (element-wise)
+        correct = (all_preds == all_labels).sum()
+        total = all_labels.size
+        accuracy = correct / total if total > 0 else 0.0
+        
+        # Multi-label metrics using sklearn
+        metrics = {
             'val_loss': total_loss / num_batches,
             'val_cls_loss': cls_loss_sum / num_batches,
             'val_reg_loss': reg_loss_sum / num_batches,
-            'val_accuracy': accuracy
+            'val_accuracy': accuracy,
         }
+        
+        try:
+            # ROC-AUC (macro-averaged over isotopes with both classes present)
+            # Only compute for columns that have both 0s and 1s
+            valid_cols = []
+            for i in range(all_labels.shape[1]):
+                if len(np.unique(all_labels[:, i])) == 2:
+                    valid_cols.append(i)
+            
+            if valid_cols:
+                auc_macro = roc_auc_score(
+                    all_labels[:, valid_cols], 
+                    all_probs[:, valid_cols], 
+                    average='macro'
+                )
+                auc_micro = roc_auc_score(
+                    all_labels[:, valid_cols], 
+                    all_probs[:, valid_cols], 
+                    average='micro'
+                )
+                metrics['val_auc_macro'] = auc_macro
+                metrics['val_auc_micro'] = auc_micro
+            else:
+                metrics['val_auc_macro'] = 0.0
+                metrics['val_auc_micro'] = 0.0
+                
+        except ValueError:
+            # Handle case where AUC can't be computed
+            metrics['val_auc_macro'] = 0.0
+            metrics['val_auc_micro'] = 0.0
+        
+        # F1, Precision, Recall (samples-averaged for multi-label)
+        metrics['val_f1_macro'] = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+        metrics['val_f1_micro'] = f1_score(all_labels, all_preds, average='micro', zero_division=0)
+        metrics['val_precision'] = precision_score(all_labels, all_preds, average='micro', zero_division=0)
+        metrics['val_recall'] = recall_score(all_labels, all_preds, average='micro', zero_division=0)
+        
+        # Hamming loss (fraction of labels incorrectly predicted)
+        metrics['val_hamming'] = hamming_loss(all_labels, all_preds)
+        
+        # Exact match ratio (all isotopes correct for a sample)
+        exact_matches = (all_preds == all_labels).all(axis=1).sum()
+        metrics['val_exact_match'] = exact_matches / len(all_labels)
+        
+        return metrics
     
     def save_checkpoint(self, path: Path, is_best: bool = False):
         """Save a model checkpoint."""
@@ -358,9 +456,11 @@ class VegaTrainer:
             epoch_time = time.time() - epoch_start
             lr = self.optimizer.param_groups[0]['lr']
             
+            # Primary metrics line
             log_str = (
-                f"Epoch {epoch+1}/{self.config.num_epochs} | "
+                f"Epoch {epoch+1:3d}/{self.config.num_epochs} | "
                 f"Train Loss: {train_metrics['train_loss']:.4f} | "
+                f"Train Acc: {train_metrics['train_accuracy']:.4f} | "
             )
             if val_loader:
                 log_str += (
@@ -373,6 +473,24 @@ class VegaTrainer:
                 log_str += " *"
             
             print(log_str)
+            
+            # Timing breakdown line
+            data_t = train_metrics.get('data_time', 0)
+            compute_t = train_metrics.get('compute_time', 0)
+            if data_t > 0 or compute_t > 0:
+                data_pct = 100 * data_t / (data_t + compute_t) if (data_t + compute_t) > 0 else 0
+                print(f"         └── Data: {data_t:.1f}s ({data_pct:.0f}%) | Compute: {compute_t:.1f}s ({100-data_pct:.0f}%)")
+            
+            # Secondary metrics line (detailed classification metrics)
+            if val_loader and 'val_auc_macro' in val_metrics:
+                detail_str = (
+                    f"         └── AUC: {val_metrics['val_auc_macro']:.4f} | "
+                    f"F1: {val_metrics['val_f1_macro']:.4f} | "
+                    f"Prec: {val_metrics['val_precision']:.4f} | "
+                    f"Recall: {val_metrics['val_recall']:.4f} | "
+                    f"Exact: {val_metrics['val_exact_match']:.4f}"
+                )
+                print(detail_str)
             
             # Early stopping
             if self.epochs_without_improvement >= self.config.patience:
@@ -453,7 +571,7 @@ def train_vega(
     # Get isotope index
     isotope_index = get_default_isotope_index()
     
-    # Create data loaders
+    # Create data loaders with parallel loading
     train_loader, val_loader, test_loader = create_data_loaders(
         data_dir=data_path,
         batch_size=config.batch_size,
@@ -461,6 +579,8 @@ def train_vega(
         val_split=config.val_split,
         test_split=config.test_split,
         num_workers=config.num_workers,
+        prefetch_factor=config.prefetch_factor,
+        persistent_workers=config.persistent_workers,
         isotope_index=isotope_index,
         max_activity_bq=config.max_activity_bq,
         seed=config.seed

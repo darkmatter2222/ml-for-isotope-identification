@@ -27,7 +27,7 @@ def main():
     parser.add_argument(
         "--data-dir", "-d",
         type=str,
-        default="data/synthetic",
+        default="O:/master_data_collection/isotopev2",
         help="Path to synthetic data directory"
     )
     parser.add_argument(
@@ -47,8 +47,8 @@ def main():
     parser.add_argument(
         "--batch-size", "-b",
         type=int,
-        default=32,
-        help="Batch size for training"
+        default=64,
+        help="Batch size for training (default: 64 for better GPU utilization)"
     )
     parser.add_argument(
         "--learning-rate", "-lr",
@@ -71,6 +71,14 @@ def main():
         help="Disable automatic mixed precision training"
     )
     
+    # Data loading parallelism
+    parser.add_argument(
+        "--workers", "-w",
+        type=int,
+        default=8,
+        help="Number of data loading workers (default: 8 for parallel I/O)"
+    )
+    
     args = parser.parse_args()
     
     # Create training config
@@ -81,7 +89,8 @@ def main():
         learning_rate=args.learning_rate,
         num_epochs=args.epochs if not args.test else 5,
         patience=10 if not args.test else 3,
-        use_amp=not args.no_amp
+        use_amp=not args.no_amp,
+        num_workers=args.workers
     )
     
     # Create model config
@@ -96,6 +105,7 @@ def main():
     print(f"Batch size: {config.batch_size}")
     print(f"Learning rate: {config.learning_rate}")
     print(f"Mixed precision: {config.use_amp}")
+    print(f"Data workers: {config.num_workers}")
     if args.test:
         print("MODE: Quick test run")
     print("=" * 60 + "\n")
