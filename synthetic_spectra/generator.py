@@ -394,7 +394,8 @@ def save_spectrum(
     spectrum: GeneratedSpectrum,
     output_dir: Path,
     save_image: bool = True,
-    image_format: str = 'npy'
+    image_format: str = 'npy',
+    save_individual_label: bool = True
 ) -> Dict[str, str]:
     """
     Save a generated spectrum to disk.
@@ -404,6 +405,7 @@ def save_spectrum(
         output_dir: Output directory path
         save_image: Whether to save the spectrum data as an image/array
         image_format: Format for spectrum data ('npy', 'png', 'both')
+        save_individual_label: Whether to save individual JSON label file per sample
     
     Returns:
         Dict of saved file paths
@@ -439,7 +441,13 @@ def save_spectrum(
             except ImportError:
                 print("Warning: PIL not installed, skipping PNG save")
     
-    # Labels are saved separately by the batch generator
+    # Save individual label JSON file (for efficient loading)
+    if save_individual_label:
+        json_path = output_dir / f"{base_name}.json"
+        with open(json_path, 'w') as f:
+            json.dump(spectrum.labels, f, indent=2)
+        saved_files['json'] = str(json_path)
+    
     saved_files['sample_id'] = spectrum.sample_id
     
     return saved_files
@@ -450,7 +458,10 @@ def generate_labels_json(
     output_path: Path
 ) -> None:
     """
-    Generate a JSON file with labels for all spectra.
+    Generate a combined JSON file with labels for all spectra.
+    
+    Note: This is for backward compatibility. For large datasets,
+    individual JSON files per sample are more efficient.
     
     Args:
         spectra: List of generated spectra

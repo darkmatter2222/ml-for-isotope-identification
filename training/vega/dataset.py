@@ -3,6 +3,10 @@ Dataset and DataLoader for Vega Model Training
 
 Handles loading synthetic gamma spectra from numpy files and converting
 them to PyTorch tensors with proper labels for multi-task learning.
+
+Supports two label formats:
+1. Individual JSON files per sample (recommended for large datasets)
+2. Combined labels.json file (legacy format)
 """
 
 import json
@@ -31,7 +35,10 @@ class SpectrumDataset(Dataset):
     """
     PyTorch Dataset for synthetic gamma spectra.
     
-    Loads spectra from numpy files and their labels from a JSON metadata file.
+    Loads spectra from numpy files and their labels from JSON files.
+    Supports both individual JSON files per sample (efficient for large datasets)
+    and combined labels.json (legacy format).
+    
     Converts to tensors suitable for the Vega model.
     """
     
@@ -47,7 +54,7 @@ class SpectrumDataset(Dataset):
         Initialize the dataset.
         
         Args:
-            data_dir: Path to directory containing labels.json and spectra/
+            data_dir: Path to directory containing spectra/ subdirectory
             isotope_index: Index mapping isotope names to indices
             max_activity_bq: Maximum activity for normalization
             collapse_time: If True, average across time dimension to get 1D spectrum
@@ -60,21 +67,69 @@ class SpectrumDataset(Dataset):
         self.collapse_time = collapse_time
         self.transform = transform
         
-        # Load metadata
-        self.metadata = self._load_metadata()
-        self.sample_ids = list(self.metadata['samples'].keys())
+        # Detect label format and load sample list
+        self.use_individual_labels = self._detect_label_format()
+        
+        if self.use_individual_labels:
+            # Scan for individual JSON files (efficient - no loading needed)
+            self.sample_ids = self._scan_for_samples()
+            self.metadata = None  # Labels loaded on-demand
+            print(f"Using individual label files (efficient mode)")
+        else:
+            # Load combined labels.json (legacy mode)
+            self.metadata = self._load_metadata()
+            self.sample_ids = list(self.metadata['samples'].keys())
+            print(f"Using combined labels.json (legacy mode)")
         
         print(f"Loaded dataset with {len(self.sample_ids)} samples")
         print(f"Isotope index has {self.isotope_index.num_isotopes} isotopes")
     
+    def _detect_label_format(self) -> bool:
+        """Detect whether to use individual JSON files or combined labels.json."""
+        # Check if individual JSON files exist
+        json_files = list(self.spectra_dir.glob("spectrum_*.json"))
+        if len(json_files) > 0:
+            return True
+        
+        # Fall back to combined labels.json
+        labels_path = self.data_dir / "labels.json"
+        if labels_path.exists():
+            return False
+        
+        raise FileNotFoundError(
+            f"No label files found. Expected either:\n"
+            f"  - Individual files: {self.spectra_dir}/spectrum_*.json\n"
+            f"  - Combined file: {self.data_dir}/labels.json"
+        )
+    
+    def _scan_for_samples(self) -> List[str]:
+        """Scan directory for sample IDs based on .npy files."""
+        npy_files = sorted(self.spectra_dir.glob("spectrum_*.npy"))
+        sample_ids = []
+        for npy_path in npy_files:
+            # Extract sample ID from filename: spectrum_{id}.npy
+            filename = npy_path.stem  # spectrum_{id}
+            sample_id = filename.replace("spectrum_", "")
+            sample_ids.append(sample_id)
+        return sample_ids
+    
     def _load_metadata(self) -> Dict:
-        """Load the labels.json metadata file."""
+        """Load the combined labels.json metadata file (legacy format)."""
         labels_path = self.data_dir / "labels.json"
         if not labels_path.exists():
             raise FileNotFoundError(f"Labels file not found: {labels_path}")
         
         with open(labels_path, 'r') as f:
             return json.load(f)
+    
+    def _load_sample_label(self, sample_id: str) -> Dict:
+        """Load label for a single sample (individual JSON or from combined)."""
+        if self.use_individual_labels:
+            json_path = self.spectra_dir / f"spectrum_{sample_id}.json"
+            with open(json_path, 'r') as f:
+                return json.load(f)
+        else:
+            return self.metadata['samples'][sample_id]
     
     def __len__(self) -> int:
         return len(self.sample_ids)
@@ -91,7 +146,7 @@ class SpectrumDataset(Dataset):
                 - sample_id: String identifier
         """
         sample_id = self.sample_ids[idx]
-        sample_meta = self.metadata['samples'][sample_id]
+        sample_meta = self._load_sample_label(sample_id)
         
         # Load spectrum
         spectrum_path = self.spectra_dir / f"spectrum_{sample_id}.npy"
