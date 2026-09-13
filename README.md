@@ -1,3 +1,7 @@
+> **☕ Support my work**
+>
+> If this project has helped you, consider supporting my work on [**Buy Me a Coffee**](https://buymeacoffee.com/j6oiubzfnh).
+
 # ML for Isotope Identification
 
 A machine learning system for identifying radioactive isotopes from gamma-ray spectra captured by Radiacode scintillation detectors.
